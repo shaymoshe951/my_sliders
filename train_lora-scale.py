@@ -484,14 +484,14 @@ if __name__ == "__main__":
         "--folders",
         type=str,
         required=False,
-        default = 'bangs0, bangs1, bangs2',
+        default = 'outputbangs_1, outputbangs1',
         help="folders with different attribute-scaled images",
     )
     parser.add_argument(
         "--scales",
         type=str,
         required=False,
-        default = '-1,0,1',
+        default = '-1,1',
         help="scales for different attribute-scaled images",
     )
     
