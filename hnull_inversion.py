@@ -4,6 +4,10 @@ from PIL import Image
 from typing import Optional, Union, Tuple, List, Callable, Dict
 import torch
 from tqdm import tqdm
+from torch.optim.adam import Adam
+import torch.nn.functional as nnf
+from diffusers import DDIMScheduler, StableDiffusionPipeline
+import ptp_utils
 
 
 def load_512(image_path, left=0, right=0, top=0, bottom=0):
@@ -29,6 +33,17 @@ def load_512(image_path, left=0, right=0, top=0, bottom=0):
 
 
 class NullInversion:
+    def __init__(self, model, guidance_scale = 7.5, device = 'cuda', num_ddim_steps = 50):
+        scheduler = DDIMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", clip_sample=False,
+                                  set_alpha_to_one=False)
+        self.guidance_scale = guidance_scale
+        self.device = device
+        self.num_ddim_steps = num_ddim_steps
+        self.model = model
+        self.tokenizer = self.model.tokenizer
+        self.model.scheduler.set_timesteps(self.num_ddim_steps)
+        self.prompt = None
+        self.context = None
 
     def prev_step(self, model_output: Union[torch.FloatTensor, np.ndarray], timestep: int,
                   sample: Union[torch.FloatTensor, np.ndarray]):
@@ -145,8 +160,8 @@ class NullInversion:
         uncond_embeddings, cond_embeddings = self.context.chunk(2)
         uncond_embeddings_list = []
         latent_cur = latents[-1]
-        bar = tqdm(total=num_inner_steps * NUM_DDIM_STEPS)
-        for i in range(NUM_DDIM_STEPS):
+        bar = tqdm(total=num_inner_steps * self.num_ddim_steps)
+        for i in range(self.num_ddim_steps):
             uncond_embeddings = uncond_embeddings.clone().detach()
             uncond_embeddings.requires_grad = True
             optimizer = Adam([uncond_embeddings], lr=1e-2 * (1. - i / 100.))
@@ -156,7 +171,7 @@ class NullInversion:
                 noise_pred_cond = self.get_noise_pred_single(latent_cur, t, cond_embeddings)
             for j in range(num_inner_steps):
                 noise_pred_uncond = self.get_noise_pred_single(latent_cur, t, uncond_embeddings)
-                noise_pred = noise_pred_uncond + GUIDANCE_SCALE * (noise_pred_cond - noise_pred_uncond)
+                noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_cond - noise_pred_uncond)
                 latents_prev_rec = self.prev_step(noise_pred, t, latent_cur)
                 loss = nnf.mse_loss(latents_prev_rec, latent_prev)
                 optimizer.zero_grad()
@@ -181,7 +196,8 @@ class NullInversion:
         ptp_utils.register_attention_control(self.model, None)
 
         image_gt = load_512(image_path, *offsets)
-        display(Image.fromarray(image_gt))
+        # plt.imshow(Image.fromarray(image_gt))
+        # plt.show()
         # image_gt = torch.from_numpy(image_gt).to(dtype=torch.float16, device="cuda")
 
         if verbose:
@@ -192,14 +208,7 @@ class NullInversion:
         uncond_embeddings = self.null_optimization(ddim_latents, num_inner_steps, early_stop_epsilon)
         return (image_gt, image_rec), ddim_latents[-1], uncond_embeddings
 
-    def __init__(self, model, guidance_scale = 7.5, device = 'cuda', num_ddim_steps):
-        scheduler = DDIMScheduler(beta_start=0.00085, beta_end=0.012, beta_schedule="scaled_linear", clip_sample=False,
-                                  set_alpha_to_one=False)
-        self.model = model
-        self.tokenizer = self.model.tokenizer
-        self.model.scheduler.set_timesteps(NUM_DDIM_STEPS)
-        self.prompt = None
-        self.context = None
+
 
 
 # null_inversion = NullInversion(ldm_stable)
