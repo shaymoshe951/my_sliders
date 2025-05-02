@@ -25,6 +25,10 @@ import numpy as np
 import wandb
 from PIL import Image
 
+import matplotlib.pyplot as plt
+import warnings
+warnings.simplefilter("ignore", FutureWarning)
+
 def flush():
     torch.cuda.empty_cache()
     gc.collect()
@@ -169,6 +173,7 @@ def train(
 
     flush()
 
+    loss_vector = np.zeros((config.train.iterations,))
     pbar = tqdm(range(config.train.iterations))
     for i in pbar:
         with torch.no_grad():
@@ -301,7 +306,7 @@ def train(
         low_latents.requires_grad = False
         
         loss_high = criteria(target_latents_high, high_noise.cpu().to(torch.float32))
-        pbar.set_description(f"Loss*1k: {loss_high.item()*1000:.4f}")
+        # pbar.set_description(f"Loss*1k: {loss_high.item()*1000:.4f}")
         loss_high.backward()
         
         
@@ -325,9 +330,12 @@ def train(
         low_latents.requires_grad = False
         
         loss_low = criteria(target_latents_low, low_noise.cpu().to(torch.float32))
-        pbar.set_description(f"Loss*1k: {loss_low.item()*1000:.4f}")
+        # pbar.set_description(f"Loss*1k: {loss_low.item()*1000:.4f}")
         loss_low.backward()
-        
+        total_loss_val = loss_high.item() + loss_low.item()
+        loss_vector[i] = total_loss_val
+        pbar.set_description(f"Loss*1k: {total_loss_val*1000:.4f}")
+
         ## NOTICE NO zero_grad between these steps (accumulating gradients) 
         #following guidelines from Ostris (https://github.com/ostris/ai-toolkit)
         
@@ -370,8 +378,13 @@ def train(
 
     flush()
 
+    plt.plot(moving_average(loss_vector, window_size=100))
+    plt.show()
     print("Done.")
 
+
+def moving_average(data, window_size=10):
+    return np.convolve(data, np.ones(window_size)/window_size, mode='valid')
 
 def main(args):
     config_file = args.config_file
