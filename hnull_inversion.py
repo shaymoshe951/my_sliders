@@ -31,6 +31,11 @@ def load_512(image_path, left=0, right=0, top=0, bottom=0):
     image = np.array(Image.fromarray(image).resize((512, 512)))
     return image
 
+def load_256(image_path, left=0, right=0, top=0, bottom=0):
+    image = Image.open(image_path)
+    image = np.array(image.resize((256,256)))
+    return image
+
 
 class NullInversion:
     def __init__(self, model, guidance_scale = 7.5, device = 'cuda', num_ddim_steps = 50):
@@ -193,9 +198,12 @@ class NullInversion:
     def invert(self, image_path: str, prompt: str, offsets=(0, 0, 0, 0), num_inner_steps=10, early_stop_epsilon=1e-5,
                verbose=False):
         self.init_prompt(prompt)
+
         ptp_utils.register_attention_control(self.model, None)
 
-        image_gt = load_512(image_path, *offsets)
+        # image_gt = load_512(image_path, *offsets)
+        image_gt = load_256(image_path, *offsets)
+        print(256)
         # plt.imshow(Image.fromarray(image_gt))
         # plt.show()
         # image_gt = torch.from_numpy(image_gt).to(dtype=torch.float16, device="cuda")

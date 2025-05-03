@@ -219,13 +219,13 @@ def train(
             
             ims = os.listdir(f'{folder_main}/{folder1}/')
             ims = [im_ for im_ in ims if '.png' in im_ or '.jpg' in im_ or '.jpeg' in im_ or '.webp' in im_]
-            random_sampler = random.randint(0, len(ims)-1)
+            random_sampler = 0 if config.train.single_image else random.randint(0, len(ims)-1)
 
             img1 = Image.open(f'{folder_main}/{folder1}/{ims[random_sampler]}').resize((256,256))
             img2 = Image.open(f'{folder_main}/{folder2}/{ims[random_sampler]}').resize((256,256))
-            
+
             seed = random.randint(0,2*15)
-            
+
             generator = torch.manual_seed(seed)
             denoised_latents_low, low_noise = train_util.get_noisy_image(
                 img1,
@@ -379,6 +379,10 @@ def train(
     flush()
 
     plt.plot(moving_average(loss_vector, window_size=100))
+    title_str = f"alpha={config.network.alpha}, rank={config.network.rank}, 2 types (pos & neg)"
+    if config.train.single_image:
+        title_str += ", single image"
+    plt.title(title_str)
     plt.show()
     print("Done.")
 
@@ -397,12 +401,13 @@ def main(args):
         attributes = args.attributes.split(',')
         attributes = [a.strip() for a in attributes]
     
-    config.network.alpha = args.alpha
-    config.network.rank = args.rank
-    config.save.name += f'_alpha{args.alpha}'
+    config.network.alpha = args.alpha if args.alpha is not None else config.network.alpha
+    config.network.rank = args.rank if args.rank is not None else config.network.rank
+    config.save.name += f'_alpha{config.network.alpha}'
     config.save.name += f'_rank{config.network.rank }'
     config.save.name += f'_{config.network.training_method}'
     config.save.path += f'/{config.save.name}'
+    print(config.save.path)
 
     prompts = prompt_util.load_prompts_from_yaml(config.prompts_file, attributes)
     device = torch.device(f"cuda:{args.device}")
@@ -424,7 +429,7 @@ def main(args):
         for i in range(int(check[0]), int(check[1])):
             folder_main = args.folder_main+ f'{i}'
             config.save.name = f'{os.path.basename(folder_main)}'
-            config.save.name += f'_alpha{args.alpha}'
+            config.save.name += f'_alpha{config.network.alpha}'
             config.save.name += f'_rank{config.network.rank }'
             config.save.path = f'models/{config.save.name}'
             train(config=config, prompts=prompts, device=device, folder_main = folder_main)
@@ -436,13 +441,14 @@ if __name__ == "__main__":
     parser.add_argument(
         "--config_file",
         required=False,
-        default = 'data/config.yaml',
+        default = '/workspace/my_sliders/data/config.yaml',
         help="Config file for training.",
     )
     parser.add_argument(
         "--alpha",
         type=float,
-        required=True,
+        required=False,
+        default=None,
         help="LoRA weight.",
     )
     
@@ -451,7 +457,7 @@ if __name__ == "__main__":
         type=int,
         required=False,
         help="Rank of LoRA.",
-        default=4,
+        default=None,
     )
     
     parser.add_argument(
@@ -466,8 +472,8 @@ if __name__ == "__main__":
         "--name",
         type=str,
         required=False,
-        default=None,
-        help="Device to train on.",
+        default='bangslider',
+        help="Name of the slider.",
     )
     
     parser.add_argument(
@@ -481,7 +487,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--folder_main",
         type=str,
-        required=True,
+        required=False,
+        default='/workspace/my_sliders/datasets/Different_hairline_db',
         help="The folder to check",
     )
     
