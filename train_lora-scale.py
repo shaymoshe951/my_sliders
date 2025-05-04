@@ -49,6 +49,7 @@ def train(
     folder_main: str,
     folders,
     scales,
+    mask_folder: str = None,
 ):
     scales = np.array(scales)
     folders = np.array(folders)
@@ -223,6 +224,13 @@ def train(
 
             img1 = Image.open(f'{folder_main}/{folder1}/{ims[random_sampler]}').resize((256,256))
             img2 = Image.open(f'{folder_main}/{folder2}/{ims[random_sampler]}').resize((256,256))
+            if args.mask_folder is not None:
+                mask = Image.open(f'{folder_main}/{args.mask_folder}/{ims[random_sampler]}').resize((256,256))
+                mask = np.array(mask.resize((256//8, 256//8))) / 255.0
+                mask = (mask > 0.5).astype(np.float32)  # Binary mask: 0 or 1
+                mask_tensor = torch.from_numpy(mask).to(device, dtype=weight_dtype).unsqueeze(0).unsqueeze(0)  # Shape: [1, 1, img1.size//8, img1.size//8]
+            else:
+                mask_tensor = torch.ones((1, 1, 256//8, 256//8), dtype=weight_dtype).to(device)  # fallback: full image mask
 
             seed = random.randint(0,2*15)
 
@@ -267,6 +275,7 @@ def train(
                     prompt_pair.batch_size,
                 ),
                 guidance_scale=1,
+                mask_tensor=mask_tensor,
             ).to("cpu", dtype=torch.float32)
             # with network: の外では空のLoRAのみが有効になる
             low_latents = train_util.predict_noise(
@@ -280,11 +289,13 @@ def train(
                     prompt_pair.batch_size,
                 ),
                 guidance_scale=1,
+                mask_tensor=mask_tensor,
             ).to("cpu", dtype=torch.float32)
-            if config.logging.verbose:
-                print("positive_latents:", positive_latents[0, 0, :5, :5])
-                print("neutral_latents:", neutral_latents[0, 0, :5, :5])
-                print("unconditional_latents:", unconditional_latents[0, 0, :5, :5])
+            # TODO: Remove
+            # if config.logging.verbose:
+            #     print("positive_latents:", positive_latents[0, 0, :5, :5])
+            #     print("neutral_latents:", neutral_latents[0, 0, :5, :5])
+            #     print("unconditional_latents:", unconditional_latents[0, 0, :5, :5])
         
         network.set_lora_slider(scale=scale_to_look)
         with network:
@@ -299,13 +310,14 @@ def train(
                     prompt_pair.batch_size,
                 ),
                 guidance_scale=1,
+                mask_tensor=mask_tensor,
             ).to("cpu", dtype=torch.float32)
             
             
         high_latents.requires_grad = False
         low_latents.requires_grad = False
         
-        loss_high = criteria(target_latents_high, high_noise.cpu().to(torch.float32))
+        loss_high = criteria(target_latents_high* mask_tensor.cpu(), high_noise.cpu().to(torch.float32) * mask_tensor.cpu())
         # pbar.set_description(f"Loss*1k: {loss_high.item()*1000:.4f}")
         loss_high.backward()
         
@@ -323,13 +335,15 @@ def train(
                     prompt_pair.batch_size,
                 ),
                 guidance_scale=1,
+                mask_tensor=mask_tensor,
             ).to("cpu", dtype=torch.float32)
             
             
         high_latents.requires_grad = False
         low_latents.requires_grad = False
-        
-        loss_low = criteria(target_latents_low, low_noise.cpu().to(torch.float32))
+
+
+        loss_low = criteria(target_latents_low * mask_tensor.cpu(), low_noise.cpu().to(torch.float32) * mask_tensor.cpu())
         # pbar.set_description(f"Loss*1k: {loss_low.item()*1000:.4f}")
         loss_low.backward()
         total_loss_val = loss_high.item() + loss_low.item()
@@ -406,6 +420,8 @@ def main(args):
     config.save.name += f'_alpha{config.network.alpha}'
     config.save.name += f'_rank{config.network.rank }'
     config.save.name += f'_{config.network.training_method}'
+    if config.train.single_image:
+        config.save.name += f'_single_image'
     config.save.path += f'/{config.save.name}'
     print(config.save.path)
 
@@ -434,7 +450,8 @@ def main(args):
             config.save.path = f'models/{config.save.name}'
             train(config=config, prompts=prompts, device=device, folder_main = folder_main)
     else:
-        train(config=config, prompts=prompts, device=device, folder_main = args.folder_main, folders = folders, scales = scales)
+        train(config=config, prompts=prompts, device=device, folder_main = args.folder_main, folders = folders, scales = scales,
+              mask_folder=args.mask_folder)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -514,7 +531,14 @@ if __name__ == "__main__":
         default = '-1,1',
         help="scales for different attribute-scaled images",
     )
-    
+    parser.add_argument(
+        "--mask_folder",
+        type=str,
+        required=False,
+        default = 'masks',
+        help="Folder for mask",
+    )
+
     
     args = parser.parse_args()
 

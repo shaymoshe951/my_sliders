@@ -150,6 +150,7 @@ def predict_noise(
     latents: torch.FloatTensor,
     text_embeddings: torch.FloatTensor,  # uncond な text embed と cond な text embed を結合したもの
     guidance_scale=7.5,
+    mask_tensor = None,
 ) -> torch.FloatTensor:
     # expand the latents if we are doing classifier-free guidance to avoid doing two forward passes.
     latent_model_input = torch.cat([latents] * 2)
@@ -168,6 +169,9 @@ def predict_noise(
     guided_target = noise_pred_uncond + guidance_scale * (
         noise_pred_text - noise_pred_uncond
     )
+
+    if mask_tensor is not None:
+        guided_target = mask_tensor * guided_target + (1 - mask_tensor) * latents  # Blend with original latents
 
     return guided_target
 
