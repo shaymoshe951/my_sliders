@@ -256,6 +256,7 @@ def train_slider(args):
 
     print("🔥 Starting Training Loop...")
     global_step = 0
+    loss_vector = []
     for epoch in itertools.count():
         unet.train()
         for step, batch in enumerate(dataloader):
@@ -306,8 +307,9 @@ def train_slider(args):
 
             if accelerator.sync_gradients:
                 global_step += 1
+                loss_vector.append(loss.item())
                 if accelerator.is_main_process:
-                    if global_step % args.log_every == 0: print(f"E{epoch} S{global_step} Loss:{loss.item():.4f}(P:{loss_p.item():.4f} N:{loss_n.item():.4f})")
+                    if global_step % args.log_every == 0: print(f"E{epoch} S{global_step} Loss*1k:{loss.item()*1000:.4f}(P*1k:{loss_p.item()*1000:.4f} N*1k:{loss_n.item()*1000:.4f})")
                     if global_step > 0 and global_step % args.save_every == 0: save_progress(unet, accelerator, args.output_dir, global_step)
                 if global_step >= args.max_steps: break
         if global_step >= args.max_steps: break
