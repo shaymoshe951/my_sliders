@@ -89,6 +89,8 @@ from diffusers.loaders import AttnProcsLayers
 from peft import LoraConfig, get_peft_model
 from accelerate import Accelerator
 from safetensors.torch import save_file
+import warnings
+warnings.simplefilter("ignore", FutureWarning)
 
 # ---------------------------
 #  UTILITY FUNCTIONS
@@ -149,9 +151,14 @@ def train_slider(args):
     accelerator = Accelerator(gradient_accumulation_steps=args.gradient_accumulation_steps)
     device = accelerator.device
 
-    print("🧩 Loading in‑paint pipeline…")
+    print("🧩 Loading in‑paint pipeline…")
     pipe_cls = StableDiffusionXLInpaintPipeline if "xl" in args.pretrained_model.lower() else StableDiffusionInpaintPipeline
-    pipe = pipe_cls.from_pretrained(args.pretrained_model, torch_dtype=torch.float16 if args.mixed_precision else torch.float32)
+    pipe = pipe_cls.from_pretrained(args.pretrained_model,
+                                    torch_dtype=torch.float16 if args.mixed_precision else torch.float32)
+
+    # Move the entire pipeline to the device before creating LoRA
+    pipe.to(device)
+
     pipe.vae.requires_grad_(False)  # freeze VAE
     pipe.text_encoder.requires_grad_(False)  # freeze text encoder
 
@@ -172,6 +179,9 @@ def train_slider(args):
     # Optimizer
     optimizer = torch.optim.AdamW(pipe.unet.parameters(), lr=args.learning_rate)
 
+    # Prepare with accelerator
+    pipe.unet, optimizer, dataloader = accelerator.prepare(pipe.unet, optimizer, dataloader)
+
     global_step = 0
     pipe.unet.train()
 
@@ -184,23 +194,29 @@ def train_slider(args):
 
             # Sample timesteps
             timesteps = torch.randint(0, pipe.scheduler.config.num_train_timesteps, (bsz,), device=device).long()
-            noise = torch.randn_like(img_p)
 
-            def encode(img):
-                latents = pipe.vae.encode(img.to(pipe.vae.dtype)).latent_dist.sample() * pipe.vae.config.scaling_factor
-                latents = latents + noise
-                return latents
+            # Encode the images to get latents first
+            with torch.no_grad():
+                latents_p = pipe.vae.encode(img_p).latent_dist.sample() * pipe.vae.config.scaling_factor
+                latents_n = pipe.vae.encode(img_n).latent_dist.sample() * pipe.vae.config.scaling_factor
 
-            latents_p = encode(img_p)
-            latents_n = encode(img_n)
+            # Now create appropriate noise with the same shape as the latents
+            noise_p = torch.randn_like(latents_p)
+            noise_n = torch.randn_like(latents_n)
+
+            # Add noise to latents according to the timesteps
+            noisy_latents_p = pipe.scheduler.add_noise(latents_p, noise_p, timesteps)
+            noisy_latents_n = pipe.scheduler.add_noise(latents_n, noise_n, timesteps)
 
             # ================= Forward with +1 (adds attribute) =================
-            noise_pred_p = pipe.unet(latents_p, timesteps, encoder_hidden_states=None, mask=mask_p, lora_scale=+1.0).sample
-            loss_p = torch.nn.functional.mse_loss(noise_pred_p, noise)
+            noise_pred_p = pipe.unet(noisy_latents_p, timesteps, encoder_hidden_states=None, mask=mask_p,
+                                     lora_scale=+1.0).sample
+            loss_p = torch.nn.functional.mse_loss(noise_pred_p, noise_p)
 
             # ================= Forward with -1 (removes attribute) ===============
-            noise_pred_n = pipe.unet(latents_n, timesteps, encoder_hidden_states=None, mask=mask_n, lora_scale=-1.0).sample
-            loss_n = torch.nn.functional.mse_loss(noise_pred_n, noise)
+            noise_pred_n = pipe.unet(noisy_latents_n, timesteps, encoder_hidden_states=None, mask=mask_n,
+                                     lora_scale=-1.0).sample
+            loss_n = torch.nn.functional.mse_loss(noise_pred_n, noise_n)
 
             loss = (loss_p + loss_n) / 2.0
             accelerator.backward(loss)
@@ -210,7 +226,7 @@ def train_slider(args):
                 optimizer.zero_grad()
 
             if accelerator.is_main_process and global_step % args.log_every == 0:
-                print(f"step {global_step} – loss {loss.item():.4f}")
+                print(f"step {global_step} – loss {loss.item():.4f}")
 
             if accelerator.is_main_process and global_step % args.save_every == 0 and global_step > 0:
                 save_adapter(pipe.unet, args.output_dir, global_step)
@@ -223,7 +239,6 @@ def train_slider(args):
 
     if accelerator.is_main_process:
         save_adapter(pipe.unet, args.output_dir, "final")
-
 
 def save_adapter(unet: nn.Module, out_dir: str, step):
     out_dir = Path(out_dir)
