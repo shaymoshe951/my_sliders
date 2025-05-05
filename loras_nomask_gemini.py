@@ -1,15 +1,16 @@
-# LoRA Slider Training & Inference for Stable Diffusion Image-to-Image
-# =====================================================================
-# Author: ChatGPT (May 2025) - Adapted from Txt2Img/Inpainting versions
+# LoRA Slider Training (Txt2Img Style) & Inference (Img2Img Style - Callable Multi-Slider)
+# ========================================================================================
+# Author: ChatGPT (May 2025) - Adapted for callable multi-slider inference
 #
 # This single Python module provides **both** a training routine (text-to-image style)
 # to learn a LoRA adapter that behaves like a *continuous attribute slider*, **and** an
-# inference routine (image-to-image style) that lets you apply that slider effect
-# to an existing input image.
+# inference routine (image-to-image style) that can be called as a Python function
+# with a list of slider values to apply that effect to an existing input image and
+# get back a list of generated images. The CLI supports single slider inference.
 #
-# Why a single file? You can copy‑paste it to any host, run `python
-# lora_slider_img2img.py train ‑‑help` to start training, or
-# `python lora_slider_img2img.py infer ‑‑help` to perform inference.
+# Why a single file? Copy‑paste it, run `python script.py train ‑‑help` for training,
+# `python script.py infer ‑‑help` for single CLI inference, or call `run_inference`
+# from Python.
 #
 # The code is written against **diffusers ≥ 0.26.0**, **peft ≥ 0.10.0**,
 # **torch ≥ 2.1**, **accelerate**, **safetensors**, and **transformers**.
@@ -41,23 +42,45 @@
 # ────────────────
 # • Training (Same as Txt2Img)::
 #
-#     python lora_slider_img2img.py train \
+#     python lora_slider_img2img_callable.py train \
 #         --pretrained_model runwayml/stable-diffusion-v1-5 \
 #         --dataset_dir /path/to/your/dataset \
 #         --output_dir  /path/to/your/checkpoints/slider \
 #         --resolution 512 --batch_size 4 --rank 8 --alpha 16 \
 #         --max_steps 10000 --save_every 1000
 #
-# • Inference (Image-to-Image)::
+# • Inference (Image-to-Image via CLI - single slider)::
 #
-#     python lora_slider_img2img.py infer \
+#     python lora_slider_img2img_callable.py infer \
 #         --pretrained_model runwayml/stable-diffusion-v1-5 \
 #         --adapter_path  /path/to/your/checkpoints/slider/adapter-final.safetensors \
 #         --input_image   path/to/your/input.png \
 #         --prompt "a portrait of a person" \
-#         --slider 0.7    # slider value for the learned attribute
+#         --slider 0.7    # single slider value for the learned attribute
 #         --strength 0.75 # How much to change the input image
 #         --output_image  out.png
+#
+# • Inference (Image-to-Image via Python Function - multi-slider)::
+#
+#     from lora_slider_img2img_callable import run_inference
+#     from PIL import Image
+#
+#     slider_values = [-1.0, -0.5, 0.0, 0.5, 1.0]
+#     output_images = run_inference(
+#         pretrained_model="runwayml/stable-diffusion-v1-5",
+#         adapter_path="/path/to/your/checkpoints/slider/adapter-final.safetensors",
+#         input_image="/path/to/your/input.png",
+#         prompt="a portrait of a person",
+#         slider=slider_values, # Pass a list of values
+#         strength=0.8,
+#         num_inference_steps=50,
+#         seed=1234,
+#         # output_image parameter is ignored when slider is a list
+#     )
+#
+#     # output_images is a list of PIL Image objects, one for each slider value
+#     for i, img in enumerate(output_images):
+#         img.save(f"output_{slider_values[i]:.2f}.png") # Save each image
 #
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -81,8 +104,8 @@ from accelerate.utils import set_seed
 from diffusers import (
     StableDiffusionPipeline,
     StableDiffusionXLPipeline,
-    StableDiffusionImg2ImgPipeline,    # Added for inference
-    StableDiffusionXLImg2ImgPipeline, # Added for inference
+    StableDiffusionImg2ImgPipeline,
+    StableDiffusionXLImg2ImgPipeline,
     AutoencoderKL,
     DDIMScheduler,
 )
@@ -100,10 +123,8 @@ def load_image(path: Path, size: Optional[int] = None) -> Image.Image:
     """Loads an image, optionally resizing it."""
     img = Image.open(path).convert("RGB")
     if size is not None and size > 0:
-        # Resize while maintaining aspect ratio using LANCZOS, fitting within size x size
-        # This is a simple resize, consider more sophisticated cropping/padding if needed
-        img.thumbnail((size, size), Image.LANCZOS)
-        # Or force resize: img = img.resize((size, size), Image.LANCZOS)
+        # Use LANCZOS filter for high-quality downsampling
+        img = img.resize((size, size), Image.LANCZOS)
     return img
 
 # PairedImageDataset remains the same as the Text-to-Image version
@@ -135,7 +156,6 @@ class PairedImageDataset(Dataset):
         return len(self.pos_files)
 
     def _read_pair(self, file_info: dict):
-        # Load image using PIL first for transforms
         img_pil = Image.open(file_info["img"]).convert("RGB")
         img_tensor = self.img_transforms(img_pil)
         prompt = self.default_prompt
@@ -149,7 +169,7 @@ class PairedImageDataset(Dataset):
 
 
 # ---------------------------
-#  TRAINING (Same as Text-to-Image version)
+#  TRAINING (Same as previous version)
 # ---------------------------
 def train_slider(args):
     accelerator = Accelerator(
@@ -159,28 +179,24 @@ def train_slider(args):
     device = accelerator.device
     set_seed(args.seed)
 
-    print("🧩 Loading base text-to-image pipeline for training components...")
-    # Load standard pipeline to get components (VAE, UNet, TextEncoder)
+    print("🧩 Loading base pipeline for training components...")
     base_pipe_cls = StableDiffusionXLPipeline if "xl" in args.pretrained_model.lower() else StableDiffusionPipeline
     try:
-        # Load components with appropriate dtype
         pipe = base_pipe_cls.from_pretrained(args.pretrained_model, torch_dtype=torch.float16 if args.mixed_precision else torch.float32)
     except EnvironmentError as e:
         print(f"Error loading model '{args.pretrained_model}': {e}")
         sys.exit(1)
 
-    # Move & Freeze non-trainable parts
     pipe.vae.to(device, dtype=torch.float16 if args.mixed_precision else torch.float32).requires_grad_(False)
     pipe.text_encoder.to(device, dtype=torch.float16 if args.mixed_precision else torch.float32).requires_grad_(False)
-    # Handle SDXL's second encoder if present
     if hasattr(pipe, "text_encoder_2") and pipe.text_encoder_2 is not None:
         pipe.text_encoder_2.to(device, dtype=torch.float16 if args.mixed_precision else torch.float32).requires_grad_(False)
         print("🧊 Freezing Text Encoder 2...")
-    pipe.unet.to(device, dtype=torch.float16 if args.mixed_precision else torch.float32) # UNet moved but requires_grad will be handled by PEFT
+    pipe.unet.to(device, dtype=torch.float16 if args.mixed_precision else torch.float32)
 
     print("🧊 Freezing VAE and Text Encoder(s)...")
-
     print("🚀 Adding LoRA adapter to UNet...")
+
     lora_config = LoraConfig(
         r=args.rank,
         lora_alpha=args.alpha,
@@ -204,11 +220,10 @@ def train_slider(args):
     optimizer = torch.optim.AdamW(pipe.unet.parameters(), lr=args.learning_rate)
 
     print("✨ Preparing with Accelerator...")
-    unet, optimizer, dataloader = accelerator.prepare(pipe.unet, optimizer, dataloader) # Prepare trainable parts
+    unet, optimizer, dataloader = accelerator.prepare(pipe.unet, optimizer, dataloader)
 
-    # Get references to potentially unwrapped components
-    vae = pipe.vae # Already moved and frozen
-    text_encoder = pipe.text_encoder # Already moved and frozen
+    vae = pipe.vae
+    text_encoder = pipe.text_encoder
     tokenizer = pipe.tokenizer
     scheduler = pipe.scheduler
     text_encoder_2 = pipe.text_encoder_2 if hasattr(pipe, "text_encoder_2") else None
@@ -217,7 +232,6 @@ def train_slider(args):
     unet_dtype = unet.dtype
     vae_dtype = vae.dtype
 
-    # --- Helper Functions (within train_slider scope) ---
     def encode_latents(img_batch):
         img_batch = img_batch.to(device=device, dtype=vae_dtype)
         with torch.no_grad():
@@ -235,12 +249,11 @@ def train_slider(args):
             text_input_ids_2 = text_inputs_2.input_ids.to(device)
             with torch.no_grad():
                 prompt_embeds_2 = text_encoder_2(text_input_ids_2)[0]
-                pooled_prompt_embeds = text_encoder_2(text_input_ids_2)[1] # Pooled output for XL
+                pooled_prompt_embeds = text_encoder_2(text_input_ids_2)[1]
             prompt_embeds = torch.cat([prompt_embeds, prompt_embeds_2], dim=-1)
             add_text_embeds = pooled_prompt_embeds
         return prompt_embeds.to(unet_dtype), add_text_embeds.to(unet_dtype) if add_text_embeds is not None else None
 
-    # --- Training Loop ---
     print("🔥 Starting Training Loop...")
     global_step = 0
     for epoch in itertools.count():
@@ -248,7 +261,7 @@ def train_slider(args):
         for step, batch in enumerate(dataloader):
             with accelerator.accumulate(unet):
                 (img_p, prompt_p), (img_n, prompt_n) = batch
-                bsz = img_p.shape[0] # Get batch size from image tensor
+                bsz = img_p.shape[0]
 
                 latents_p = encode_latents(img_p)
                 latents_n = encode_latents(img_n)
@@ -265,7 +278,6 @@ def train_slider(args):
                 latent_model_input_p = noisy_latents_p.to(unet_dtype)
                 latent_model_input_n = noisy_latents_n.to(unet_dtype)
 
-                # Handle SDXL added conditions (time_ids)
                 add_time_ids_p = add_time_ids_n = None
                 unet_added_conditions_p = {}
                 unet_added_conditions_n = {}
@@ -275,7 +287,7 @@ def train_slider(args):
                     unet_added_conditions_p = {"text_embeds": add_text_embeds_p.to(unet_dtype), "time_ids": add_time_ids.to(unet_dtype)}
                     unet_added_conditions_n = {"text_embeds": add_text_embeds_n.to(unet_dtype), "time_ids": add_time_ids.to(unet_dtype)}
 
-                # Forward pass
+
                 noise_pred_p = unet(latent_model_input_p, timesteps, encoder_hidden_states=prompt_embeds_p,
                                     cross_attention_kwargs={"scale": 1.0}, added_cond_kwargs=unet_added_conditions_p).sample
                 noise_pred_n = unet(latent_model_input_n, timesteps, encoder_hidden_states=prompt_embeds_n,
@@ -292,7 +304,6 @@ def train_slider(args):
                     optimizer.step()
                     optimizer.zero_grad()
 
-            # Logging & Saving
             if accelerator.sync_gradients:
                 global_step += 1
                 if accelerator.is_main_process:
@@ -333,8 +344,8 @@ def run_inference(
     adapter_path: str,
     input_image: Union[str, Path, Image.Image], # Accept path or PIL Image
     prompt: str,
-    slider: float = 0.0,
-    output_image: Optional[Union[str, Path]] = None, # Optional output path
+    slider: Union[float, List[float], Tuple[float, ...]] = 0.0, # Accept float or list/tuple
+    output_image: Optional[Union[str, Path]] = None, # Optional output path (ignored for list of sliders)
     negative_prompt: Optional[str] = None,
     strength: float = 0.75,
     guidance_scale: float = 7.5,
@@ -342,7 +353,7 @@ def run_inference(
     seed: int = 42,
     device: Optional[Union[str, torch.device]] = None, # Allow overriding device
     dtype: Optional[torch.dtype] = None, # Allow overriding dtype
-) -> Image.Image:
+) -> Union[Image.Image, List[Image.Image]]: # Return single image or list of images
     """
     Runs Stable Diffusion Image-to-Image inference with a LoRA slider.
 
@@ -351,19 +362,34 @@ def run_inference(
         adapter_path: Path to the trained LoRA adapter (.safetensors file).
         input_image: Path to the input image file or a PIL Image object.
         prompt: Text prompt guiding the transformation.
-        slider: LoRA scale slider value in [-1, 1]. Defaults to 0.0 (neutral).
-        output_image: Optional path to save the output image. If None, image is not saved.
+        slider: LoRA scale slider value(s) in [-1, 1]. Can be a single float
+                or a list/tuple of floats. Defaults to 0.0 (neutral).
+        output_image: Optional path to save the *single* output image (if
+                      a single slider value is provided). Ignored if 'slider'
+                      is a list/tuple.
         negative_prompt: Optional negative prompt.
-        strength: Img2Img strength (0-1). Higher values allow more deviation from input image.
+        strength: Img2Img strength (0-1). Higher values allow more deviation
+                  from input image.
         guidance_scale: Classifier-Free Guidance scale.
         num_inference_steps: Number of diffusion inference steps.
         seed: Random seed for reproducibility.
-        device: Optional device to use (e.g., "cuda", "cpu"). Defaults to "cuda" if available.
-        dtype: Optional torch dtype for the pipeline (e.g., torch.float16). Defaults to float16 on CUDA, float32 otherwise.
+        device: Optional device to use (e.g., "cuda", "cpu"). Defaults to
+                "cuda" if available.
+        dtype: Optional torch dtype for the pipeline (e.g., torch.float16).
+               Defaults to float16 on CUDA, float32 otherwise.
 
     Returns:
-        A PIL Image object of the generated output.
+        A single PIL Image object if a single slider value is provided,
+        otherwise a list of PIL Image objects, one for each slider value.
     """
+    # Ensure slider is always treated as a list for internal loop
+    is_single_slider = not isinstance(slider, (list, tuple))
+    slider_values = [slider] if is_single_slider else list(slider)
+
+    if not slider_values:
+         print("Warning: No slider values provided. Returning empty list.")
+         return [] if not is_single_slider else None # Return appropriate empty type
+
     # Determine device if not specified
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -375,7 +401,7 @@ def run_inference(
         dtype = torch.float16 if device.type == "cuda" else torch.float32
         # Use bfloat16 on CPU if supported and mixed precision might be intended
         if device.type == "cpu" and torch.cuda.is_available() and torch.cuda.is_bf16_supported():
-             dtype = torch.bfloat16 # Common for CPU inference with Accelerate
+             dtype = torch.bfloat16
 
     print(f"🚀 Loading Img2Img pipeline {pretrained_model} on {device} with {dtype}...")
     pipe_cls = StableDiffusionXLImg2ImgPipeline if "xl" in pretrained_model.lower() else StableDiffusionImg2ImgPipeline
@@ -391,18 +417,17 @@ def run_inference(
         print("✅ LoRA Adapter loaded successfully.")
     except Exception as e:
         print(f"Error loading LoRA adapter from {adapter_path}: {e}")
-        # Decide whether to exit or just warn. For a callable function, raising is better.
         raise # Re-raise the error
 
     pipe.to(device)
-    # pipe.set_progress_bar_config(disable=False) # Progress bar might be noisy in callable use
+    # Progress bar might be noisy for multi-slider calls, disable by default in callable
+    pipe.set_progress_bar_config(disable=True)
 
     # Load or use the input image
     if isinstance(input_image, (str, Path)):
         print(f"🖼️ Loading input image from {input_image}...")
         try:
-            # Load the input image without forcing a size initially
-            input_image_pil = load_image(Path(input_image), size=None)
+            input_image_pil = load_image(Path(input_image), size=None) # Load original size
             print(f"   Input image loaded (Size: {input_image_pil.size})")
         except FileNotFoundError:
             raise FileNotFoundError(f"Input image not found at {input_image}")
@@ -414,47 +439,71 @@ def run_inference(
     else:
         raise TypeError(f"input_image must be a path (str/Path) or a PIL Image, not {type(input_image)}")
 
-
-    generator = torch.Generator(device=device).manual_seed(seed)
-
-    print(f"⏳ Running Img2Img generation with slider: {slider:.2f}, strength: {strength:.2f}")
     # Determine autocast device type
     autocast_device = device.type if device.type != "mps" else "cpu" # MPS doesn't support autocast
-    try:
-        # Use autocast for mixed precision inference if applicable
-        with torch.autocast(autocast_device, dtype=dtype):
-            result = pipe(
-                prompt=prompt,
-                image=input_image_pil,
-                strength=strength,
-                guidance_scale=guidance_scale,
-                num_inference_steps=num_inference_steps, # Use parameter name
-                negative_prompt=negative_prompt,
-                generator=generator,
-                cross_attention_kwargs={"scale": slider},
-                num_images_per_prompt=1,
-                # height/width are optional for img2img, often inferred from image or defaults
-                # height=height, # Can pass these if you want to force output size
-                # width=width,
-            ).images[0]
 
-        if output_image:
-            output_path = Path(output_image)
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            result.save(output_path)
-            print(f"✅ Saved result → {output_path}")
+    results = []
+    # Iterate through each slider value provided
+    for i, current_slider_value in enumerate(slider_values):
+        print(f"⏳ Generating image for slider value: {current_slider_value:.2f} ({i+1}/{len(slider_values)})")
+        # Use a different seed for each image *if* desired for variation,
+        # or use the same seed for consistency across slider values.
+        # Using same seed + generator for now for clear comparison of slider effect.
+        generator = torch.Generator(device=device).manual_seed(seed)
 
-        return result # Return the PIL Image object
+        try:
+            with torch.autocast(autocast_device, dtype=dtype):
+                result = pipe(
+                    prompt=prompt,
+                    image=input_image_pil,
+                    strength=strength,
+                    guidance_scale=guidance_scale,
+                    num_inference_steps=num_inference_steps,
+                    negative_prompt=negative_prompt,
+                    generator=generator, # Use generator created above
+                    cross_attention_kwargs={"scale": current_slider_value}, # Pass the current slider value
+                    num_images_per_prompt=1,
+                ).images[0]
 
-    except Exception as e:
-        print(f"😭 Inference failed: {e}")
-        import traceback
-        traceback.print_exc()
-        raise # Re-raise the error
+            results.append(result) # Add the resulting image to the list
+
+        except Exception as e:
+            print(f"😭 Inference failed for slider value {current_slider_value}: {e}")
+            # Decide how to handle failure for one value in a list.
+            # Option 1: Raise immediately (stops all remaining).
+            # Option 2: Print warning, add None to results, continue.
+            # Option 3: Print warning, skip this value, continue.
+            # Option 2 (adding None) is safer for callable API, lets caller see which failed.
+            results.append(None)
+            import traceback
+            traceback.print_exc() # Print traceback for failed item
+
+
+    # --- Handle saving for single output only (CLI case) ---
+    # The CLI wrapper will call this function with a list containing a single slider value.
+    # We only save automatically if *originally* a single slider value was requested
+    # AND an output_image path was provided.
+    if is_single_slider and output_image:
+         if len(results) > 0 and results[0] is not None:
+             try:
+                 output_path = Path(output_image)
+                 output_path.parent.mkdir(parents=True, exist_ok=True)
+                 results[0].save(output_path)
+                 print(f"✅ Saved result → {output_path}")
+             except Exception as e:
+                 print(f"Error saving output image {output_image}: {e}")
+         else:
+             print("Warning: No image generated to save.")
+    # -------------------------------------------------------
+
+    # Return the results list (or the single image if only one was requested)
+    return results[0] if is_single_slider and results else results # Return single image or list
+
 
 # ---------------------------
 #  CLI ENTRY
 # ---------------------------
+
 def build_arg_parser():
     # --- Defaults ---
     default_model = "/workspace/models/sd1_5_inpaint"
@@ -503,43 +552,49 @@ def build_arg_parser():
     train.add_argument("--num_workers", type=int, default=4, help="Dataloader worker processes.")
     train.add_argument("--max_grad_norm", type=float, default=1.0, help="Max gradient norm for clipping.")
 
-    # —— Infer Arguments (Img2Img Style) ——
-    infer = sub.add_parser("infer", help="Run image-to-image inference using a trained LoRA slider")
+    # —— Infer Arguments (Img2Img Style - for CLI use) ——
+    # These map to the parameters of the run_inference function, but CLI takes single slider
+    infer = sub.add_parser("infer", help="Run image-to-image inference via command line")
     infer.add_argument("--pretrained_model", default=default_model, help="Base model ID (HF Hub) or path.")
     infer.add_argument("--adapter_path", required=True, default=default_adapter_path, help="Path to the trained LoRA adapter (.safetensors).")
-    infer.add_argument("--input_image", required=True, default=default_infer_input_image, help="Path to the input image.") # Added back
+    infer.add_argument("--input_image", required=True, default=default_infer_input_image, help="Path to the input image.")
     infer.add_argument("--prompt", required=True, default=default_infer_prompt, help="Text prompt guiding the transformation.")
-    infer.add_argument("--output_image", default="result.png", help="Path to save the output image.")
-    # infer.add_argument("--height", type=int, default=default_resolution, help="Output image height (often optional for img2img).")
-    # infer.add_argument("--width", type=int, default=default_resolution, help="Output image width (often optional for img2img).")
+    infer.add_argument("--output_image", default="result.png", help="Path to save the output image.") # Optional in function, default here
     infer.add_argument("--negative_prompt", default=None, help="Optional negative prompt.")
-    infer.add_argument("--strength", type=float, default=0.75, help="Img2Img strength (0-1). Higher values allow more deviation from input image.") # Added strength
+    infer.add_argument("--strength", type=float, default=0.75, help="Img2Img strength (0-1). Higher values allow more deviation.")
     infer.add_argument("--guidance_scale", type=float, default=7.5, help="CFG scale.")
-    infer.add_argument("--num_steps", type=int, default=50, help="Number of inference steps.") # Was 30
+    infer.add_argument("--num_steps", type=int, default=30, help="Number of inference steps.")
     infer.add_argument("--seed", type=int, default=42, help="Random seed.")
     infer.add_argument("--slider", type=float, default=0.0, help="LoRA scale slider value in [-1, 1].")
-    # No mask_image argument
+    # Note: CLI inference only supports a single slider value directly.
+    # To run multiple slider values via CLI, you'd write a small shell/Python script
+    # that loops and calls this script repeatedly with different --slider values.
 
     return parser
 
 # Keep the _run_inference_cli wrapper function to handle CLI args -> callable function
 def _run_inference_cli(args):
     """Wrapper function to call the main run_inference from CLI args."""
-    # Call the callable function, passing values from the args namespace
+    # Call the callable function with the single slider value wrapped in a list
+    # This ensures the callable function's multi-slider logic is used,
+    # but since it's a single value, it will return a single image.
+    # The output_image path is handled by the callable function itself
+    # when it detects a single slider value was originally requested.
     run_inference(
         pretrained_model=args.pretrained_model,
         adapter_path=args.adapter_path,
         input_image=args.input_image, # Path from CLI
         prompt=args.prompt,
-        slider=args.slider,
-        output_image=args.output_image, # Path to save
+        slider=args.slider, # Pass as a single float for the callable's logic
+        output_image=args.output_image, # Pass path to save
         negative_prompt=args.negative_prompt,
         strength=args.strength,
         guidance_scale=args.guidance_scale,
-        num_inference_steps=args.num_steps, # Map CLI arg name to function param name
+        num_inference_steps=args.num_steps,
         seed=args.seed,
         # Device and dtype are defaulted in the callable function if not passed
     )
+
 
 if __name__ == "__main__":
     parser = build_arg_parser()
