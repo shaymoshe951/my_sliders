@@ -113,8 +113,8 @@ class PairedInpaintDataset(Dataset):
     """Returns ((pos_img, pos_mask, pos_prompt), (neg_img, neg_mask, neg_prompt))"""
 
     def __init__(self, root: str, resolution: int = 512, default_prompt: str = ""):
-        self.pos_files = sorted((Path(root) / "positive").glob("*.png"))
-        self.neg_files = sorted((Path(root) / "negative").glob("*.png"))
+        self.pos_files = [fpath for fpath in sorted((Path(root) / "positive").glob("*.png")) if 'mask' not in fpath.stem ]
+        self.neg_files = [fpath for fpath in sorted((Path(root) / "negative").glob("*.png")) if 'mask' not in fpath.stem ]
         assert len(self.pos_files) == len(self.neg_files) > 0, "Positive and negative folders must be same length"
         self.resolution = resolution
         self.default_prompt = default_prompt
@@ -265,6 +265,7 @@ def run_inference(args):
             lora_scale=args.slider,
         ).images[0]
 
+    result.show()
     result.save(args.output_image)
     print(f"✅ Saved result → {args.output_image}")
 
@@ -287,13 +288,14 @@ def build_arg_parser():
     if is_single_folder:
         output_dir += "_single"
     adapter_path = output_dir + "/adapter-final.safetensors"
-    input_image = "/workspace/my_sliders/datasets/Different_hairline_db_oai/updated_caption_image.png"
+    infer_input_image = "/workspace/my_sliders/datasets/Different_hairline_db_oai/single/neutral/updated_caption_image.png"
+    infer_mask_image = "/workspace/my_sliders/datasets/Different_hairline_db_oai/single/neutral/updated_caption_image_mask.png"
     infer_prompt = "hairline control slider"
     train_prompt = infer_prompt
 
     parser = argparse.ArgumentParser(description="LoRA Slider Trainer / Inference for Stable Diffusion In‑Painting")
     # sub = parser.add_subparsers(dest="command", required=True)
-    sub = parser.add_subparsers(dest="command", required=False, default=command)
+    sub = parser.add_subparsers(dest="command", required=False)
 
     # —— Train ——
     train = sub.add_parser("train")
@@ -334,8 +336,8 @@ def build_arg_parser():
 
     infer.add_argument("--pretrained_model", required=False, default=model_path)
     infer.add_argument("--adapter_path", required=False, default=adapter_path)
-    infer.add_argument("--input_image", required=False, default=input_image)
-    infer.add_argument("--mask_image", required=False, default=mask_image)
+    infer.add_argument("--input_image", required=False, default=infer_input_image)
+    infer.add_argument("--mask_image", required=False, default=infer_mask_image)
     infer.add_argument("--prompt", required=False, default=infer_prompt)
 
     return parser
@@ -349,4 +351,4 @@ if __name__ == "__main__":
         train_slider(args)
     elif args.command == "infer":
         run_inference(args)
-"}
+
