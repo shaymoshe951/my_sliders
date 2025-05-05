@@ -422,6 +422,8 @@ def main(args):
     config.save.name += f'_{config.network.training_method}'
     if config.train.single_image:
         config.save.name += f'_single_image'
+    if args.mask_folder:
+        config.save.name += f'_{args.mask_folder}'
     config.save.path += f'/{config.save.name}'
     print(config.save.path)
 
@@ -440,6 +442,7 @@ def main(args):
         raise Exception('the number of folders need to match the number of scales')
     
     if args.stylecheck is not None:
+        raise Exception("Not supported") # Need to update train function below
         check = args.stylecheck.split('-')
         
         for i in range(int(check[0]), int(check[1])):

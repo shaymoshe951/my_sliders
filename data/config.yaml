@@ -5,18 +5,18 @@ pretrained_model:
   v_pred: false # true if model uses v-prediction
 network:
   type: "c3lier" # or "c3lier" or "lierla"
-  rank: 16
+  rank: 8
   alpha: 1.0
   training_method: "noxattn"
 train:
   precision: "bfloat16"
   noise_scheduler: "ddim" # or "ddpm", "lms", "euler_a"
-  iterations: 8000
+  iterations: 4000
   lr: 0.0002
   optimizer: "AdamW"
   lr_scheduler: "constant"
   max_denoising_steps: 50
-  single_image: false
+  single_image: true
 save:
   name: "temp"
   path: "./models"
