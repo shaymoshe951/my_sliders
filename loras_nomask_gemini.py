@@ -112,8 +112,13 @@ from diffusers import (
 from diffusers.loaders import LoraLoaderMixin
 from peft import LoraConfig, get_peft_model
 from peft.utils import get_peft_model_state_dict
-from safetensors.torch import save_file
+from safetensors.torch import save_file, load_file
 import transformers
+from tqdm import tqdm
+import numpy as np
+import matplotlib.pyplot as plt
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 # ---------------------------
 #  UTILITY FUNCTIONS
@@ -257,7 +262,7 @@ def train_slider(args):
     print("🔥 Starting Training Loop...")
     global_step = 0
     loss_vector = []
-    for epoch in itertools.count():
+    for epoch in tqdm(itertools.count()):
         unet.train()
         for step, batch in enumerate(dataloader):
             with accelerator.accumulate(unet):
@@ -317,13 +322,16 @@ def train_slider(args):
     print("🏁 Training Finished.")
     if accelerator.is_main_process:
         save_progress(unet, accelerator, args.output_dir, "final")
+    plt.plot(moving_average(loss_vector, window_size=100))
+    plt.title(args.output_dir)
+    plt.show()
 
 
 def save_progress(unet: nn.Module, accelerator: Accelerator, out_dir: str, step_or_name):
     """Saves the LoRA adapter state using PEFT utility."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    filename = out_dir / f"adapter-{step_or_name}.safetensors"
+    filename = out_dir / f"adapter-{step_or_name}.pt"
     unwrapped_unet = accelerator.unwrap_model(unet)
     try:
         lora_state_dict = get_peft_model_state_dict(unwrapped_unet)
@@ -415,7 +423,18 @@ def run_inference(
 
     print(f"🚀 Loading LoRA adapter {adapter_path}...")
     try:
-        pipe.load_lora_weights(adapter_path)
+        lora_config = LoraConfig(
+            r=8,
+            lora_alpha=1,
+            bias="none",
+            init_lora_weights="gaussian",
+            target_modules=["to_k", "to_q", "to_v", "to_out.0"],  # Adjust if needed
+        )
+        pipe.unet = get_peft_model(pipe.unet, lora_config)
+        lora_state_dict = load_file(adapter_path)
+        pipe.unet.load_state_dict(lora_state_dict, strict=False)
+        pipe.unet.eval()
+        # pipe.load_lora_weights(adapter_path)
         print("✅ LoRA Adapter loaded successfully.")
     except Exception as e:
         print(f"Error loading LoRA adapter from {adapter_path}: {e}")
@@ -505,16 +524,17 @@ def run_inference(
 # ---------------------------
 #  CLI ENTRY
 # ---------------------------
+def moving_average(data, window_size=10):
+    return np.convolve(data, np.ones(window_size)/window_size, mode='valid')
 
 def build_arg_parser():
     # --- Defaults ---
-    default_model = "/workspace/models/sd1_5_inpaint"
+    default_model = "/workspace/models/sd14"
     default_rank = 8
     default_alpha = 1 #16
-    default_batch_size = 4
     default_lr = 1e-4
-    default_max_steps = 4000
-    default_save_every = 500
+    default_max_steps = 10
+    default_save_every = 200
     default_resolution = 512 # Training resolution
     default_prompt = "hairline slider control"
 
@@ -522,12 +542,14 @@ def build_arg_parser():
     is_single_folder = True
     if is_single_folder:
         default_dataset_dir = "/workspace/my_sliders/datasets/Different_hairline_db_oai/single"
+        default_batch_size = 1
     else:
         default_dataset_dir = "/workspace/my_sliders/datasets/Different_hairline_db_oai"
+        default_batch_size = 4
     default_output_dir = f"/workspace/my_sliders/models/img2img_slider_rank{default_rank}_alpha{default_alpha}"
     if is_single_folder:
         default_output_dir += "_single"
-    default_adapter_path = default_output_dir + "/adapter-final.safetensors"
+    default_adapter_path = default_output_dir + "/adapter-final.pt"
     default_infer_input_image = "/workspace/my_sliders/datasets/Different_hairline_db_oai/single/neutral/updated_caption_image.png"
     default_infer_prompt = default_prompt
 
@@ -537,8 +559,8 @@ def build_arg_parser():
     # —— Train Arguments (Txt2Img Style) ——
     train = sub.add_parser("train", help="Train a LoRA slider adapter using image pairs")
     train.add_argument("--pretrained_model", default=default_model, help="Base model ID (HF Hub) or path.")
-    train.add_argument("--dataset_dir", required=True, default=default_dataset_dir, help="Path to dataset directory with 'positive/' and 'negative/' image subfolders.")
-    train.add_argument("--output_dir", required=True, default=default_output_dir, help="Directory to save LoRA checkpoints.")
+    train.add_argument("--dataset_dir", required=False, default=default_dataset_dir, help="Path to dataset directory with 'positive/' and 'negative/' image subfolders.")
+    train.add_argument("--output_dir", required=False, default=default_output_dir, help="Directory to save LoRA checkpoints.")
     train.add_argument("--resolution", type=int, default=default_resolution, help="Resolution to resize images to for training.")
     train.add_argument("--prompt", default=default_prompt, help="Default prompt if no '.txt' files found.")
     train.add_argument("--rank", type=int, default=default_rank, help="LoRA rank.")
@@ -558,12 +580,12 @@ def build_arg_parser():
     # These map to the parameters of the run_inference function, but CLI takes single slider
     infer = sub.add_parser("infer", help="Run image-to-image inference via command line")
     infer.add_argument("--pretrained_model", default=default_model, help="Base model ID (HF Hub) or path.")
-    infer.add_argument("--adapter_path", required=True, default=default_adapter_path, help="Path to the trained LoRA adapter (.safetensors).")
-    infer.add_argument("--input_image", required=True, default=default_infer_input_image, help="Path to the input image.")
-    infer.add_argument("--prompt", required=True, default=default_infer_prompt, help="Text prompt guiding the transformation.")
+    infer.add_argument("--adapter_path", required=False, default=default_adapter_path, help="Path to the trained LoRA adapter (.safetensors).")
+    infer.add_argument("--input_image", required=False, default=default_infer_input_image, help="Path to the input image.")
+    infer.add_argument("--prompt", required=False, default=default_infer_prompt, help="Text prompt guiding the transformation.")
     infer.add_argument("--output_image", default="result.png", help="Path to save the output image.") # Optional in function, default here
     infer.add_argument("--negative_prompt", default=None, help="Optional negative prompt.")
-    infer.add_argument("--strength", type=float, default=0.75, help="Img2Img strength (0-1). Higher values allow more deviation.")
+    infer.add_argument("--strength", type=float, default=0.1, help="Img2Img strength (0-1). Higher values allow more deviation.")
     infer.add_argument("--guidance_scale", type=float, default=7.5, help="CFG scale.")
     infer.add_argument("--num_steps", type=int, default=30, help="Number of inference steps.")
     infer.add_argument("--seed", type=int, default=42, help="Random seed.")
