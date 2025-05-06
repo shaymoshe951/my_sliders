@@ -363,6 +363,7 @@ def run_inference(
     seed: int = 42,
     device: Optional[Union[str, torch.device]] = None, # Allow overriding device
     dtype: Optional[torch.dtype] = None, # Allow overriding dtype
+    is_adaptor_format_peft = True
 ) -> Union[Image.Image, List[Image.Image]]: # Return single image or list of images
     """
     Runs Stable Diffusion Image-to-Image inference with a LoRA slider.
@@ -423,18 +424,20 @@ def run_inference(
 
     print(f"🚀 Loading LoRA adapter {adapter_path}...")
     try:
-        lora_config = LoraConfig(
-            r=8,
-            lora_alpha=1,
-            bias="none",
-            init_lora_weights="gaussian",
-            target_modules=["to_k", "to_q", "to_v", "to_out.0"],  # Adjust if needed
-        )
-        pipe.unet = get_peft_model(pipe.unet, lora_config)
-        lora_state_dict = load_file(adapter_path)
-        pipe.unet.load_state_dict(lora_state_dict, strict=False)
-        pipe.unet.eval()
-        # pipe.load_lora_weights(adapter_path)
+        if is_adaptor_format_peft: # Format training
+            lora_config = LoraConfig(
+                r=8,
+                lora_alpha=1,
+                bias="none",
+                init_lora_weights="gaussian",
+                target_modules=["to_k", "to_q", "to_v", "to_out.0"],  # Adjust if needed
+            )
+            pipe.unet = get_peft_model(pipe.unet, lora_config)
+            lora_state_dict = load_file(adapter_path)
+            pipe.unet.load_state_dict(lora_state_dict, strict=False)
+            pipe.unet.eval()
+        else:
+            pipe.load_lora_weights(adapter_path)
         print("✅ LoRA Adapter loaded successfully.")
     except Exception as e:
         print(f"Error loading LoRA adapter from {adapter_path}: {e}")
@@ -530,11 +533,11 @@ def moving_average(data, window_size=10):
 def build_arg_parser():
     # --- Defaults ---
     default_model = "/workspace/models/sd14"
-    default_rank = 8
-    default_alpha = 1 #16
+    default_rank = 4
+    default_alpha = 4 #16
     default_lr = 1e-4
-    default_max_steps = 10
-    default_save_every = 200
+    default_max_steps = 3000
+    default_save_every = 500
     default_resolution = 512 # Training resolution
     default_prompt = "hairline slider control"
 
