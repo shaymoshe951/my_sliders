@@ -538,7 +538,7 @@ if __name__ == "__main__":
         "--mask_folder",
         type=str,
         required=False,
-        default = 'masks',
+        default = None, # 'masks'
         help="Folder for mask",
     )
 

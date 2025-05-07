@@ -6,21 +6,21 @@ pretrained_model:
 network:
   type: "c3lier" # or "c3lier" or "lierla"
   rank: 8
-  alpha: 1.0
+  alpha: 8.0
   training_method: "noxattn"
 train:
   precision: "bfloat16"
   noise_scheduler: "ddim" # or "ddpm", "lms", "euler_a"
-  iterations: 4000
+  iterations: 8000
   lr: 0.0002
   optimizer: "AdamW"
   lr_scheduler: "constant"
   max_denoising_steps: 50
-  single_image: true
+  single_image: false
 save:
   name: "temp"
-  path: "./models"
-  per_steps: 500
+  path: "./lora_adaptors"
+  per_steps: 1000
   precision: "bfloat16"
 logging:
   use_wandb: false

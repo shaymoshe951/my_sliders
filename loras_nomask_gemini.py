@@ -203,17 +203,16 @@ def train_slider(args):
     print("🧊 Freezing VAE and Text Encoder(s)...")
     print("🚀 Adding LoRA adapter to UNet...")
 
-    # TODO: TMP
-    # lora_config = LoraConfig(
-    #     r=args.rank,
-    #     lora_alpha=args.alpha,
-    #     bias="none",
-    #     init_lora_weights="gaussian",
-    #     target_modules=["to_k", "to_q", "to_v", "to_out.0"], # Adjust if needed
-    # )
-    # pipe.unet = get_peft_model(pipe.unet, lora_config)
-    # if accelerator.is_main_process:
-    #     pipe.unet.print_trainable_parameters()
+    lora_config = LoraConfig(
+        r=args.rank,
+        lora_alpha=args.alpha,
+        bias="none",
+        init_lora_weights="gaussian",
+        target_modules=["to_k", "to_q", "to_v", "to_out.0"], # Adjust if needed
+    )
+    pipe.unet = get_peft_model(pipe.unet, lora_config)
+    if accelerator.is_main_process:
+        pipe.unet.print_trainable_parameters()
 
     print("💾 Loading Dataset...")
     try:
@@ -318,8 +317,8 @@ def train_slider(args):
                 if accelerator.is_main_process:
                     if global_step % args.log_every == 0: print(f"E{epoch} S{global_step} Loss*1k:{loss.item()*1000:.4f}(P*1k:{loss_p.item()*1000:.4f} N*1k:{loss_n.item()*1000:.4f})")
                     if global_step > 0 and global_step % args.save_every == 0:
-                        # save_progress(unet, accelerator, args.output_dir, global_step)
-                        pipe.save_lora_weights(args.output_dir+f"adapter-{global_step}.pt", safe_serialization=True, unet_lora_layers=pipe.unet, text_encoder_lora_layers=pipe.text_encoder)
+                        save_progress(unet, accelerator, args.output_dir, global_step)
+                        # TODO: Remove: pipe.save_lora_weights(args.output_dir+f"adapter-{global_step}.pt", safe_serialization=True, unet_lora_layers=pipe.unet, text_encoder_lora_layers=pipe.text_encoder)
                 if global_step >= args.max_steps: break
         if global_step >= args.max_steps: break
 
