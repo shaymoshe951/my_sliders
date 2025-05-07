@@ -513,7 +513,7 @@ def build_arg_parser():
         dataset_dir = "/workspace/my_sliders/datasets/Different_hairline_db_oai/single"
     else:
         dataset_dir = "/workspace/my_sliders/datasets/Different_hairline_db_oai"
-    output_dir = f"/workspace/my_sliders/models/bs_oai_rank{rank}"
+    output_dir = f"/workspace/my_sliders/lora_adaptors/bs_oai_rank{rank}"
     if is_single_folder:
         output_dir += "_single"
     adapter_path = output_dir + "/adapter-530.safetensors"

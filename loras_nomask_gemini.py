@@ -137,8 +137,9 @@ class PairedImageDataset(Dataset):
     """Returns ((pos_img, pos_prompt), (neg_img, neg_prompt))"""
     def __init__(self, root: str, resolution: int = 512, default_prompt: str = ""):
         self.root = Path(root)
-        self.pos_img_paths = sorted([f for f in (self.root / "positive").glob("*.png")])
-        self.neg_img_paths = sorted([f for f in (self.root / "negative").glob("*.png")])
+        self.pos_img_paths = sorted([f for f in (self.root / "positive").glob("*.png") if '_mask' not in f.stem])
+        self.neg_img_paths = sorted([f for f in (self.root / "negative").glob("*.png") if '_mask' not in f.stem])
+        print("Number of samples in the dataset: {}".format(len(self.pos_img_paths)))
         if len(self.pos_img_paths) != len(self.neg_img_paths):
              raise ValueError(f"Mismatch in positive ({len(self.pos_img_paths)})/negative ({len(self.neg_img_paths)}) image counts.")
         if not self.pos_img_paths:
@@ -202,16 +203,17 @@ def train_slider(args):
     print("🧊 Freezing VAE and Text Encoder(s)...")
     print("🚀 Adding LoRA adapter to UNet...")
 
-    lora_config = LoraConfig(
-        r=args.rank,
-        lora_alpha=args.alpha,
-        bias="none",
-        init_lora_weights="gaussian",
-        target_modules=["to_k", "to_q", "to_v", "to_out.0"], # Adjust if needed
-    )
-    pipe.unet = get_peft_model(pipe.unet, lora_config)
-    if accelerator.is_main_process:
-        pipe.unet.print_trainable_parameters()
+    # TODO: TMP
+    # lora_config = LoraConfig(
+    #     r=args.rank,
+    #     lora_alpha=args.alpha,
+    #     bias="none",
+    #     init_lora_weights="gaussian",
+    #     target_modules=["to_k", "to_q", "to_v", "to_out.0"], # Adjust if needed
+    # )
+    # pipe.unet = get_peft_model(pipe.unet, lora_config)
+    # if accelerator.is_main_process:
+    #     pipe.unet.print_trainable_parameters()
 
     print("💾 Loading Dataset...")
     try:
@@ -315,7 +317,9 @@ def train_slider(args):
                 loss_vector.append(loss.item())
                 if accelerator.is_main_process:
                     if global_step % args.log_every == 0: print(f"E{epoch} S{global_step} Loss*1k:{loss.item()*1000:.4f}(P*1k:{loss_p.item()*1000:.4f} N*1k:{loss_n.item()*1000:.4f})")
-                    if global_step > 0 and global_step % args.save_every == 0: save_progress(unet, accelerator, args.output_dir, global_step)
+                    if global_step > 0 and global_step % args.save_every == 0:
+                        # save_progress(unet, accelerator, args.output_dir, global_step)
+                        pipe.save_lora_weights(args.output_dir+f"adapter-{global_step}.pt", safe_serialization=True, unet_lora_layers=pipe.unet, text_encoder_lora_layers=pipe.text_encoder)
                 if global_step >= args.max_steps: break
         if global_step >= args.max_steps: break
 
@@ -533,12 +537,12 @@ def moving_average(data, window_size=10):
 def build_arg_parser():
     # --- Defaults ---
     default_model = "/workspace/models/sd14"
-    default_rank = 4
-    default_alpha = 4 #16
-    default_lr = 1e-4
-    default_max_steps = 3000
+    default_rank = 8
+    default_alpha = 1 #16
+    default_lr = 2e-4 # 1e-4
+    default_max_steps = 4000
     default_save_every = 500
-    default_resolution = 512 # Training resolution
+    default_resolution = 256 # 512 # Training resolution
     default_prompt = "hairline slider control"
 
     # --- Placeholder paths (USER MUST PROVIDE THESE or change defaults) ---
@@ -549,9 +553,9 @@ def build_arg_parser():
     else:
         default_dataset_dir = "/workspace/my_sliders/datasets/Different_hairline_db_oai"
         default_batch_size = 4
-    default_output_dir = f"/workspace/my_sliders/models/img2img_slider_rank{default_rank}_alpha{default_alpha}"
+    default_output_dir = f"/workspace/my_sliders/lora_adaptors/img2img_slider_rank{default_rank}_alpha{default_alpha}"
     if is_single_folder:
-        default_output_dir += "_single"
+        default_output_dir += "_single_tstref"
     default_adapter_path = default_output_dir + "/adapter-final.pt"
     default_infer_input_image = "/workspace/my_sliders/datasets/Different_hairline_db_oai/single/neutral/updated_caption_image.png"
     default_infer_prompt = default_prompt

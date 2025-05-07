@@ -450,7 +450,7 @@ def main(args):
             config.save.name = f'{os.path.basename(folder_main)}'
             config.save.name += f'_alpha{config.network.alpha}'
             config.save.name += f'_rank{config.network.rank }'
-            config.save.path = f'models/{config.save.name}'
+            config.save.path = f'lora_adaptors/{config.save.name}'
             train(config=config, prompts=prompts, device=device, folder_main = folder_main)
     else:
         train(config=config, prompts=prompts, device=device, folder_main = args.folder_main, folders = folders, scales = scales,
